@@ -1,0 +1,108 @@
+---
+title: "distortion correction with antsr"
+author: "Brian B. Avants et al."
+date: "5/30/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(ANTsR)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Deformation-based distortion correction may be effective in a variety of data, as in [this paper](https://www.frontiersin.org/articles/10.3389/fninf.2017.00017/full).  We provide an example of how one might do this with ANTsR using human connectome project resting state fMRI data.
+
+Based on the discussion in ANTs [issue 594](https://github.com/ANTsX/ANTs/issues/594)
+Source repository is [here](https://github.com/stnava/distortionCorrectionWithANTs)
+
+We read in the 3D average BOLD images.
+
+```{r io}
+rdir = "/Users/stnava/code/distortionCorrectionWithANTs"
+boldLR = antsImageRead( paste0(rdir, "/data/BoldLR.nii.gz"))
+boldRL = antsImageRead( paste0(rdir,"/data/BoldRL.nii.gz"))
+```
+
+The LR image:
+
+```{r, echo=FALSE}
+invisible( plot( boldLR, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+
+
+The RL image:
+
+```{r, echo=FALSE}
+invisible( plot( boldRL, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+
+We can average out the distortions in each direction by a template building approach.
+
+```{r}
+avgLRRL = buildTemplate( boldRL, list( boldRL, boldLR ), 'SyN' )
+invisible( plot( avgLRRL, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+Let us see how this maps to T1:
+
+```{r}
+msk = getMask( avgLRRL ) %>% iMath("MD",1)
+t1 = antsImageRead( paste0( rdir, '/data/LS2001_3T_T1w_MPR1_2mm.nii.gz' ) ) %>%
+  n4BiasFieldCorrection( shrinkFactor = 8 ) %>% n4BiasFieldCorrection( shrinkFactor = 4 ) 
+t1reg = antsRegistration( avgLRRL, t1, 'Rigid' )
+invisible( plot( t1reg$warpedmovout * msk, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+Use an edge map to make it easier to compare:
+
+```{r}
+canner = iMath( t1reg$warpedmovout * msk, "Canny", 1, 5, 12  )
+invisible( plot( avgLRRL, canner, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+But isnt distortion primarily within plane?  Let's use that prior information.
+
+```{r}
+fix1 = antsRegistration( boldRL, avgLRRL, "SyNOnly", restrictTransformation = c(1,1,0) )
+```
+
+Question:  Why do we use `boldRL` as the "fixed" image?
+
+Verify by looking at the magnitude of the transformation components.
+
+```{r}
+mywarp = antsImageRead( fix1$invtransforms[2] )
+mywarpxyz = splitChannels( mywarp )
+print( paste( 
+  'X-abs-mean:', mean(abs(mywarpxyz[[1]])),
+  'Y-abs-mean:', mean(abs(mywarpxyz[[2]])),
+  'Z-abs-mean:', mean(abs(mywarpxyz[[3]])) ) )
+```
+
+Check the new output which allows deformation only in X and Y:
+
+```{r}
+invisible( plot( fix1$warpedfixout, axis=3, nslices=12, doCropping=FALSE ) )
+invisible( plot( fix1$warpedfixout, canner, axis=3, nslices=12, doCropping=FALSE ) )
+```
+
+Note:  `SyNOnly` does not do rigid transformation.  One may need to compute a separate 
+rigid transformation first and pass this as an initial transformation to `SyNOnly`.
+
+One can then apply this to the full time series ( data not provided )
+
+```{r,eval=FALSE}
+rsfMRIfixed = antsApplyTransforms(  avgLRRL,  boldRLts, fix1$invtransforms, imagetype = 3  )
+```
+
+This should be evaluated carefully before applying at large scale to new data.
+
+
+As noted by satra ghosh:
+
+> it may be useful to compare with the topup/applytopup corrected images that HCP provides. i think you may find that the topup fields can be estimated with ants. i have never done this before. the reason the spin echo images are used over the gradient echo bold images is they have less dropout.
+
+> there is also this, which uses syn: [SDC](http://fmriprep.readthedocs.io/en/latest/api/index.html#sdc-fieldmapless)
